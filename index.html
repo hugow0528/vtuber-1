@@ -9,8 +9,8 @@
   <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
   <!-- PIXI.js v6 -->
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@6/dist/browser/pixi.min.js"></script>
-  <!-- pixi-live2d-display -->
-  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
+  <!-- pixi-live2d-display: cubism4-only build (no Cubism 2 runtime needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -74,6 +74,20 @@
       color: #f0f6fc;
       flex: 1;
     }
+
+    /* ── Mode toggle ─────────────────────────────────── */
+    #mode-btn {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: #21262d;
+      border: 1px solid #58a6ff;
+      color: #58a6ff;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #mode-btn:hover { background: #1f6feb; color: #fff; border-color: #388bfd; }
+
     #panel-body {
       flex: 1;
       overflow-y: auto;
@@ -117,6 +131,36 @@
     button:hover { background: #30363d; border-color: #58a6ff; color: #58a6ff; }
     button.active { background: #1f6feb; border-color: #388bfd; color: #fff; }
 
+    /* Easy-mode expression buttons — larger, emoji-centred */
+    .expr-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .expr-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      padding: 8px 4px;
+      font-size: 11px;
+      line-height: 1.2;
+    }
+    .expr-btn .emoji { font-size: 22px; }
+
+    /* Easy-mode motion buttons — wider */
+    .motion-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 5px;
+      margin-bottom: 6px;
+    }
+    .motion-big {
+      padding: 8px 6px;
+      font-size: 12px;
+    }
+
     /* ── Sliders ─────────────────────────────────────── */
     .param-row {
       display: grid;
@@ -154,6 +198,11 @@
     .toggle-row label { color: #c9d1d9; font-size: 12px; }
     input[type=checkbox] { accent-color: #58a6ff; width: 16px; height: 16px; cursor: pointer; }
     input[type=color] { border: none; background: none; width: 30px; height: 24px; cursor: pointer; padding: 0; }
+
+    /* ── Mode visibility ─────────────────────────────── */
+    .pro-only { display: none; }
+    body.pro-mode .pro-only { display: block; }
+    body.pro-mode .easy-only { display: none; }
   </style>
 </head>
 <body>
@@ -169,12 +218,66 @@
   <div id="panel-header">
     <span>🎮</span>
     <h1>VTuber Controller</h1>
+    <button id="mode-btn" onclick="toggleMode()" title="Switch between Easy and Pro mode">⚙ Pro Mode</button>
   </div>
 
   <div id="panel-body">
 
-    <!-- Settings -->
-    <div class="section">
+    <!-- ══ EASY MODE ══════════════════════════════════ -->
+
+    <!-- Easy: Expressions -->
+    <div class="section easy-only">
+      <div class="section-title">😊 Expressions</div>
+      <div class="expr-grid">
+        <button class="expr-btn" onclick="applyExpression('normal')"  title="Normal"><span class="emoji">😐</span>Normal</button>
+        <button class="expr-btn" onclick="applyExpression('happy')"   title="Happy"><span class="emoji">😊</span>Happy</button>
+        <button class="expr-btn" onclick="applyExpression('sad')"     title="Sad"><span class="emoji">😢</span>Sad</button>
+        <button class="expr-btn" onclick="applyExpression('angry')"   title="Angry"><span class="emoji">😠</span>Angry</button>
+        <button class="expr-btn" onclick="applyExpression('surprised')" title="Surprised"><span class="emoji">😲</span>Surprised</button>
+        <button class="expr-btn" onclick="applyExpression('wink')"    title="Wink"><span class="emoji">😉</span>Wink</button>
+      </div>
+    </div>
+
+    <!-- Easy: Motions -->
+    <div class="section easy-only">
+      <div class="section-title">🎬 Motions</div>
+      <div class="motion-grid">
+        <button class="motion-big" onclick="playMotion('Idle',0)">💤 Idle 1</button>
+        <button class="motion-big" onclick="playMotion('Idle',1)">💤 Idle 2</button>
+        <button class="motion-big" onclick="playMotion('Idle',2)">💤 Idle 3</button>
+        <button class="motion-big" onclick="playMotion('Tap',0)">👆 Tap 1</button>
+        <button class="motion-big" onclick="playMotion('Tap',1)">👆 Tap 2</button>
+        <button class="motion-big" onclick="playMotion('Flick',0)">💨 Flick 1</button>
+        <button class="motion-big" onclick="playMotion('Flick',1)">💨 Flick 2</button>
+        <button class="motion-big" onclick="playMotion('FlickUp',0)">⬆ Flick Up</button>
+      </div>
+      <div class="btn-row">
+        <button style="width:100%" onclick="stopMotion()">⏹ Stop Motion</button>
+      </div>
+    </div>
+
+    <!-- Easy: Basic Settings -->
+    <div class="section easy-only">
+      <div class="section-title">⚙ Settings</div>
+      <div class="toggle-row">
+        <label>Mouse Tracking</label>
+        <input type="checkbox" id="chk-track-easy" checked onchange="toggleTracking(this.checked)" />
+      </div>
+      <div class="toggle-row">
+        <label>Background</label>
+        <input type="color" id="bg-color-easy" value="#0d1117" oninput="setBg(this.value)" />
+      </div>
+      <div class="param-row" style="grid-template-columns:110px 1fr 38px">
+        <label>Scale</label>
+        <input type="range" id="sl-scale-easy" min="0.2" max="2.0" step="0.01" value="1.0" oninput="setScale(this.value)" />
+        <span class="param-val" id="val-scale-easy">1.00</span>
+      </div>
+    </div>
+
+    <!-- ══ PRO MODE ════════════════════════════════════ -->
+
+    <!-- Pro: Settings -->
+    <div class="section pro-only">
       <div class="section-title">Settings</div>
 
       <div class="toggle-row">
@@ -195,12 +298,12 @@
       <div class="param-row" style="grid-template-columns:110px 1fr 38px">
         <label>Scale</label>
         <input type="range" id="sl-scale" min="0.2" max="2.0" step="0.01" value="1.0" oninput="setScale(this.value)" />
-        <span class="param-val" id="val-scale">1.00</span>
+        <span class="param-val" id="val-scale-pro">1.00</span>
       </div>
     </div>
 
-    <!-- Motions -->
-    <div class="section">
+    <!-- Pro: Motions -->
+    <div class="section pro-only">
       <div class="section-title">Motions</div>
       <div class="btn-row">
         <button onclick="playMotion('Idle',0)">Idle 1</button>
@@ -221,38 +324,38 @@
       </div>
     </div>
 
-    <!-- Head -->
-    <div class="section">
+    <!-- Pro: Head -->
+    <div class="section pro-only">
       <div class="section-title">Head</div>
       <div id="params-head"></div>
     </div>
 
-    <!-- Eyes -->
-    <div class="section">
+    <!-- Pro: Eyes -->
+    <div class="section pro-only">
       <div class="section-title">Eyes</div>
       <div id="params-eyes"></div>
     </div>
 
-    <!-- Eyebrows -->
-    <div class="section">
+    <!-- Pro: Eyebrows -->
+    <div class="section pro-only">
       <div class="section-title">Eyebrows</div>
       <div id="params-brow"></div>
     </div>
 
-    <!-- Mouth -->
-    <div class="section">
+    <!-- Pro: Mouth -->
+    <div class="section pro-only">
       <div class="section-title">Mouth</div>
       <div id="params-mouth"></div>
     </div>
 
-    <!-- Body -->
-    <div class="section">
+    <!-- Pro: Body -->
+    <div class="section pro-only">
       <div class="section-title">Body</div>
       <div id="params-body"></div>
     </div>
 
-    <!-- Hair / Sway -->
-    <div class="section">
+    <!-- Pro: Hair / Sway -->
+    <div class="section pro-only">
       <div class="section-title">Hair &amp; Sway</div>
       <div id="params-hair"></div>
     </div>
@@ -306,12 +409,64 @@ const PARAM_GROUPS = [
   ]},
 ];
 
+// ── Expression presets ───────────────────────────────────────────────────────
+// Each preset is a map of paramId -> value; omitted params keep their current value.
+const EXPRESSIONS = {
+  normal: {
+    ParamEyeLOpen: 1, ParamEyeROpen: 1,
+    ParamEyeLSmile: 0, ParamEyeRSmile: 0,
+    ParamBrowLY: 0, ParamBrowRY: 0,
+    ParamBrowLAngle: 0, ParamBrowRAngle: 0,
+    ParamMouthOpenY: 0, ParamMouthForm: 0,
+    ParamCheek: 0,
+  },
+  happy: {
+    ParamEyeLOpen: 0.6, ParamEyeROpen: 0.6,
+    ParamEyeLSmile: 1, ParamEyeRSmile: 1,
+    ParamBrowLY: 0.5, ParamBrowRY: 0.5,
+    ParamMouthOpenY: 0.3, ParamMouthForm: 1,
+    ParamCheek: 0.8,
+  },
+  sad: {
+    ParamEyeLOpen: 0.7, ParamEyeROpen: 0.7,
+    ParamEyeLSmile: 0, ParamEyeRSmile: 0,
+    ParamBrowLY: -0.5, ParamBrowRY: -0.5,
+    ParamBrowLAngle: -0.6, ParamBrowRAngle: 0.6,
+    ParamMouthOpenY: 0, ParamMouthForm: -0.8,
+    ParamCheek: 0,
+  },
+  angry: {
+    ParamEyeLOpen: 0.8, ParamEyeROpen: 0.8,
+    ParamEyeLSmile: 0, ParamEyeRSmile: 0,
+    ParamBrowLY: -0.3, ParamBrowRY: -0.3,
+    ParamBrowLAngle: 0.7, ParamBrowRAngle: -0.7,
+    ParamMouthOpenY: 0.1, ParamMouthForm: -0.5,
+    ParamCheek: 0,
+  },
+  surprised: {
+    ParamEyeLOpen: 1, ParamEyeROpen: 1,
+    ParamEyeLSmile: 0, ParamEyeRSmile: 0,
+    ParamBrowLY: 1, ParamBrowRY: 1,
+    ParamBrowLAngle: 0, ParamBrowRAngle: 0,
+    ParamMouthOpenY: 0.8, ParamMouthForm: 0,
+    ParamCheek: 0,
+  },
+  wink: {
+    ParamEyeLOpen: 1, ParamEyeROpen: 0,
+    ParamEyeLSmile: 0.5, ParamEyeRSmile: 1,
+    ParamBrowLY: 0.3, ParamBrowRY: 0,
+    ParamMouthOpenY: 0, ParamMouthForm: 0.6,
+    ParamCheek: 0.4,
+  },
+};
+
 // ── Config ──────────────────────────────────────────────────────────────────
 const MODEL_PATH = 'miku_sample_t04.model3.json';
 
 // ── State ───────────────────────────────────────────────────────────────────
 let app, model;
 let manualMode = false;
+let proMode = false;
 let currentScale = 1.0;
 const overrides = {}; // paramId -> value (used in manual mode)
 
@@ -375,7 +530,8 @@ function syncSliders() {
         }
       } catch (err) {
         console.debug('Failed to sync parameter:', p.id, err);
-      }    }
+      }
+    }
   }
 }
 
@@ -459,6 +615,9 @@ function stopMotion() {
 function toggleTracking(enabled) {
   if (!model) return;
   model.autoInteract = enabled;
+  // Keep both checkboxes in sync
+  document.getElementById('chk-track').checked = enabled;
+  document.getElementById('chk-track-easy').checked = enabled;
 }
 
 function toggleManual(enabled) {
@@ -478,12 +637,63 @@ function setBg(hex) {
     app.renderer.backgroundColor = n;
   }
   document.getElementById('canvas-wrap').style.background = hex;
+  // Keep both colour pickers in sync
+  document.getElementById('bg-color').value = hex;
+  document.getElementById('bg-color-easy').value = hex;
 }
 
 function setScale(v) {
   currentScale = parseFloat(v);
-  document.getElementById('val-scale').textContent = currentScale.toFixed(2);
+  const label = currentScale.toFixed(2);
+  document.getElementById('val-scale-easy').textContent = label;
+  document.getElementById('val-scale-pro').textContent = label;
+  // Keep both sliders in sync
+  document.getElementById('sl-scale').value = currentScale;
+  document.getElementById('sl-scale-easy').value = currentScale;
   positionModel();
+}
+
+// ── Expression presets (Easy mode) ──────────────────────────────────────────
+function applyExpression(name) {
+  const preset = EXPRESSIONS[name];
+  if (!preset || !model) return;
+  manualMode = true;
+  // Uncheck manual params toggle in pro panel if visible
+  const chkManual = document.getElementById('chk-manual');
+  if (chkManual) chkManual.checked = true;
+  stopMotion();
+  const core = model.internalModel.coreModel;
+  for (const [paramId, value] of Object.entries(preset)) {
+    try {
+      core.setParameterValueById(paramId, value);
+    } catch (e) {
+      console.debug('Expression param error:', paramId, e);
+    }
+    overrides[paramId] = value;
+    // Update sliders in pro panel if they exist
+    const sl = document.getElementById('sl_' + paramId);
+    const vl = document.getElementById('val_' + paramId);
+    if (sl) sl.value = value;
+    if (vl) vl.textContent = value.toFixed(2);
+  }
+  setStatus(`😊 Expression: ${name}`, 1500);
+}
+
+// ── Mode toggle ──────────────────────────────────────────────────────────────
+function toggleMode() {
+  proMode = !proMode;
+  const btn = document.getElementById('mode-btn');
+  if (proMode) {
+    document.body.classList.add('pro-mode');
+    btn.textContent = '✦ Easy Mode';
+    setStatus('⚙ Pro Mode activated', 1500);
+  } else {
+    document.body.classList.remove('pro-mode');
+    btn.textContent = '⚙ Pro Mode';
+    // Exit manual mode when switching back to easy
+    if (manualMode) toggleManual(false);
+    setStatus('😊 Easy Mode activated', 1500);
+  }
 }
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
