@@ -737,7 +737,7 @@ def main() -> None:
                 youtube_url = f"https://www.youtube.com/shorts/{video_id}"
             else:
                 upload_error = f"Upload completed but no video ID returned (got: {video_id!r})"
-        except Exception as exc:
+        except BaseException as exc:
             upload_error = str(exc)
             print(f"[ERROR] YouTube upload failed: {exc}", file=sys.stderr)
 
