@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
 """
-VTuber Auto-Short Generator
-----------------------------
+VTuber Auto-Short Generator — Pollinations Edition
+====================================================
 Pipeline:
-  1. Ask the AI to autonomously decide a topic and write a short script.
-  2. Convert the script to speech with OpenAI TTS.
-  3. Compose a YouTube Short video (portrait 9:16) with FFmpeg:
-       - Animated avatar loop (texture_00.png → video loop)
-       - TTS audio
-       - Burned-in subtitles
-  4. Upload the video to YouTube via the Data API v3.
+  1. AI (Pollinations text API, non-paid models with auto-fallback) picks a topic,
+     writes a spoken script, and generates full SEO metadata + image/music prompts.
+  2. Pollinations image API generates a vivid portrait (1080×1920) background scene.
+  3. Pollinations audio API synthesises the script via ElevenLabs TTS.
+  4. Pollinations audio API generates a short ambient music loop via ACE-Step.
+  5. FFmpeg composes a high-quality YouTube Short:
+       • Ken Burns slow-zoom on AI-generated background
+       • Styled burned-in subtitles synced to speech
+       • TTS audio mixed with ducked background music (20%)
+  6. YouTube Data API v3 uploads the video with optimised SEO metadata.
 
-Required environment variables (set as GitHub Secrets):
-  OPENAI_API_KEY          – OpenAI API key (used for both chat and TTS)
-  YOUTUBE_CLIENT_ID       – OAuth2 client ID for YouTube Data API
-  YOUTUBE_CLIENT_SECRET   – OAuth2 client secret
-  YOUTUBE_REFRESH_TOKEN   – Long-lived OAuth2 refresh token
-  YOUTUBE_CHANNEL_ID      – (optional) target channel id for tagging
+Required GitHub Secrets:
+  POLLINATIONS_API_KEY   – from https://enter.pollinations.ai
+  YOUTUBE_CLIENT_ID      – Google Cloud OAuth2 client ID
+  YOUTUBE_CLIENT_SECRET  – Google Cloud OAuth2 client secret
+  YOUTUBE_REFRESH_TOKEN  – Long-lived refresh token (youtube.upload scope)
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
+import urllib.parse
 from pathlib import Path
+from typing import Optional
 
+import requests
 from openai import OpenAI
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -38,24 +45,46 @@ from googleapiclient.http import MediaFileUpload
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-AVATAR_IMAGE = REPO_ROOT / "texture_00.png"
+AVATAR_FALLBACK = REPO_ROOT / "texture_00.png"
 
-# YouTube Short dimensions
+POLLINATIONS_BASE = "https://gen.pollinations.ai"
+POLLINATIONS_V1_BASE = "https://gen.pollinations.ai/v1"
+
+# Non-paid text models — tried in order until one succeeds
+TEXT_MODEL_FALLBACK = [
+    "openai-large",  # GPT-5.4 — most capable
+    "openai",        # GPT-5.4 Nano — balanced
+    "deepseek",      # DeepSeek V3.2
+    "kimi",          # Moonshot Kimi K2 Thinking
+    "glm",           # Z.ai GLM-5 744B MoE
+    "claude-fast",   # Anthropic Claude Haiku 4.5
+    "mistral",       # Mistral Small 3.2
+    "nova",          # Amazon Nova 2 Lite
+    "grok",          # xAI Grok 4.1
+    "minimax",       # MiniMax M2.5
+]
+
+# Non-paid image models — tried in order until one succeeds
+IMAGE_MODEL_FALLBACK = ["flux", "zimage", "klein", "wan-image"]
+
+# TTS model fallback
+TTS_MODEL_FALLBACK = ["elevenlabs", "openai"]
+TTS_VOICE = "nova"  # bright, energetic voice
+
+# Video
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 VIDEO_FPS = 30
+AUDIO_BUFFER_SECONDS = 0.5
 
-AUDIO_BUFFER_SECONDS = 0.5  # small buffer so audio doesn't clip at end
-MAX_SCRIPT_CHARS = 4096
-
-# YouTube upload settings
+# YouTube
 YOUTUBE_CATEGORY_ID = "22"   # People & Blogs
 YOUTUBE_PRIVACY = "public"   # "public" | "private" | "unlisted"
-SHORT_HASHTAG = "#Shorts"
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def env(name: str, required: bool = True) -> str:
     value = os.environ.get(name, "")
@@ -65,100 +94,235 @@ def env(name: str, required: bool = True) -> str:
     return value
 
 
-def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run a shell command, streaming output, and raise on failure."""
-    print(f"[CMD] {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=True, **kwargs)
-    return result
+def run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    print(f"[CMD] {' '.join(str(c) for c in cmd)}")
+    return subprocess.run(cmd, check=True, **kwargs)
+
+
+def pollinations_client() -> OpenAI:
+    """Return an OpenAI SDK client pointed at the Pollinations v1 base."""
+    return OpenAI(
+        base_url=POLLINATIONS_V1_BASE,
+        api_key=env("POLLINATIONS_API_KEY"),
+    )
+
+
+def _auth_header() -> dict:
+    return {"Authorization": f"Bearer {env('POLLINATIONS_API_KEY')}"}
 
 
 # ---------------------------------------------------------------------------
-# Step 1: AI decides topic + writes script
+# Step 1: AI content generation with model fallback
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""
-    You are a cheerful VTuber named Miku. You create short, engaging YouTube Shorts
-    (under 60 seconds when spoken at a natural pace — roughly 150 words or fewer).
+    You are a cheerful VTuber named Miku (Hatsune Miku style). You create short,
+    engaging YouTube Shorts (under 55 seconds when spoken — roughly 130 words or fewer).
 
-    Your task: {topic_instruction}. Write the full spoken script.
-    The script should be lively, positive, and end with a call-to-action asking viewers
-    to like and subscribe.
+    Your task: {topic_instruction}. Write the full spoken script and all metadata.
 
-    Respond ONLY with a JSON object in this exact format (no markdown fences):
+    Respond ONLY with a valid JSON object in this exact format (no markdown, no fences):
     {{
-      "title": "catchy video title (max 80 chars, include #Shorts)",
-      "description": "YouTube description (2–3 sentences + #Shorts #VTuber)",
-      "tags": ["tag1", "tag2", "tag3"],
-      "script": "The full spoken script here."
+      "title": "Catchy title max 80 chars ending with #Shorts",
+      "description": "Multi-paragraph YouTube description with emojis, subscribe CTA, and a trailing hashtag block of at least 15 hashtags. Format:\\n\\n[Hook sentence]\\n\\n[2-3 body sentences]\\n\\n━━━━━━━━━━━━━━━━━━━━━━━━\\n✨ LIKE & SUBSCRIBE for daily VTuber content!\\n�� Turn on notifications!\\n💬 Comment below!\\n━━━━━━━━━━━━━━━━━━━━━━━━\\n\\n#Shorts #VTuber #Anime #Miku [add 12+ more relevant hashtags]",
+      "tags": ["tag1", "tag2", "add 20 to 30 relevant tags here"],
+      "script": "Full spoken script approximately 130 words. Lively and positive.",
+      "bg_prompt": "Detailed Pollinations image prompt for a vivid anime 9:16 portrait scene matching the video topic. Include an anime VTuber character with blue twin-tails, art style (cinematic anime, vibrant colors), lighting, mood, and environment. High quality, detailed.",
+      "music_prompt": "Short prompt for upbeat ambient background music that fits the topic mood."
     }}
 """).strip()
 
 
 def build_system_prompt() -> str:
     custom_topic = os.environ.get("CUSTOM_TOPIC", "").strip()
-    if custom_topic:
-        topic_instruction = f'create a short video about: "{custom_topic}"'
-    else:
-        topic_instruction = "autonomously decide a fun topic for today's short video"
+    topic_instruction = (
+        f'create a short video about: "{custom_topic}"'
+        if custom_topic
+        else "autonomously decide a fun, trending topic for today's short video"
+    )
     return SYSTEM_PROMPT_TEMPLATE.format(topic_instruction=topic_instruction)
 
 
-def ai_generate_content(client: OpenAI) -> dict:
-    print("[1/4] Asking AI to pick a topic and write a script …")
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": build_system_prompt()}],
-        temperature=1.0,
-        max_tokens=600,
-    )
-    raw = response.choices[0].message.content.strip()
+def _parse_json_response(raw: str) -> dict:
+    """Strip optional markdown fences and parse JSON."""
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    raw = re.sub(r"\s*```$", "", raw)
+    return json.loads(raw)
+
+
+def ai_generate_content() -> dict:
+    print("[1/5] Asking AI to generate content + SEO metadata …")
+    client = pollinations_client()
+    system_prompt = build_system_prompt()
+    last_error: Optional[Exception] = None
+
+    for model in TEXT_MODEL_FALLBACK:
+        try:
+            print(f"    Trying model: {model}")
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}],
+                temperature=0.9,
+                max_tokens=900,
+            )
+            raw = response.choices[0].message.content.strip()
+            data = _parse_json_response(raw)
+
+            required_keys = ("title", "description", "tags", "script", "bg_prompt", "music_prompt")
+            missing = [k for k in required_keys if k not in data]
+            if missing:
+                raise ValueError(f"Missing JSON keys: {missing}")
+
+            # Truncate script to TTS-safe length
+            if len(data["script"]) > 2000:
+                data["script"] = data["script"][:2000]
+
+            print(f"    ✓ Model {model} succeeded")
+            print(f"    Title : {data['title']}")
+            return data
+
+        except Exception as exc:
+            print(f"    ✗ Model {model} failed: {exc}")
+            last_error = exc
+            time.sleep(1)
+
+    print(f"[ERROR] All text models failed. Last error: {last_error}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Background image via Pollinations image API
+# ---------------------------------------------------------------------------
+
+
+def generate_background_image(prompt: str, output_path: Path) -> None:
+    print("[2/5] Generating AI background image …")
+    encoded = urllib.parse.quote(prompt, safe="")
+    last_error: Optional[Exception] = None
+
+    for model in IMAGE_MODEL_FALLBACK:
+        try:
+            print(f"    Trying image model: {model}")
+            resp = requests.get(
+                f"{POLLINATIONS_BASE}/image/{encoded}",
+                params={
+                    "model": model,
+                    "width": VIDEO_WIDTH,
+                    "height": VIDEO_HEIGHT,
+                    "seed": -1,
+                    "enhance": "true",
+                    "safe": "true",
+                },
+                headers=_auth_header(),
+                timeout=90,
+            )
+            resp.raise_for_status()
+            if len(resp.content) < 1024:
+                raise ValueError("Response too small — likely an error page")
+            output_path.write_bytes(resp.content)
+            print(f"    ✓ Image saved ({len(resp.content) // 1024} KB) via {model}")
+            return
+
+        except Exception as exc:
+            print(f"    ✗ Image model {model} failed: {exc}")
+            last_error = exc
+            time.sleep(2)
+
+    # Final fallback: use the repo avatar texture
+    if AVATAR_FALLBACK.exists():
+        import shutil
+        shutil.copy(AVATAR_FALLBACK, output_path)
+        print(f"    ⚠ All image models failed ({last_error}); using repo avatar as background")
+    else:
+        print(f"[ERROR] Background image generation failed: {last_error}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Step 3: TTS via Pollinations audio API
+# ---------------------------------------------------------------------------
+
+
+def generate_tts(script: str, audio_path: Path) -> None:
+    print("[3/5] Generating TTS audio …")
+    last_error: Optional[Exception] = None
+
+    # Try OpenAI-compatible /v1/audio/speech endpoint first
+    for tts_model in TTS_MODEL_FALLBACK:
+        try:
+            print(f"    Trying TTS model: {tts_model}")
+            client = pollinations_client()
+            with client.audio.speech.with_streaming_response.create(
+                model=tts_model,
+                voice=TTS_VOICE,
+                input=script,
+                response_format="mp3",
+            ) as response:
+                response.stream_to_file(str(audio_path))
+            print(f"    ✓ TTS saved ({audio_path.stat().st_size // 1024} KB) via {tts_model}")
+            return
+
+        except Exception as exc:
+            print(f"    ✗ TTS model {tts_model} failed: {exc}")
+            last_error = exc
+            time.sleep(1)
+
+    # Last-resort: GET /audio/{text}?voice=nova
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Attempt to extract JSON block if the model wrapped it anyway
-        import re
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            print(f"[ERROR] Could not parse AI response:\n{raw}", file=sys.stderr)
-            sys.exit(1)
-        data = json.loads(match.group())
+        print("    Trying GET /audio/{text} fallback …")
+        encoded = urllib.parse.quote(script[:500], safe="")
+        resp = requests.get(
+            f"{POLLINATIONS_BASE}/audio/{encoded}",
+            params={"voice": TTS_VOICE},
+            headers=_auth_header(),
+            timeout=60,
+        )
+        resp.raise_for_status()
+        audio_path.write_bytes(resp.content)
+        print(f"    ✓ TTS saved via GET fallback ({audio_path.stat().st_size // 1024} KB)")
+        return
 
-    for key in ("title", "description", "tags", "script"):
-        if key not in data:
-            print(f"[ERROR] AI response missing field: {key}", file=sys.stderr)
-            sys.exit(1)
+    except Exception as exc:
+        print(f"    ✗ GET TTS fallback failed: {exc}")
 
-    # Guard against overly long scripts
-    if len(data["script"]) > MAX_SCRIPT_CHARS:
-        data["script"] = data["script"][:MAX_SCRIPT_CHARS]
-
-    print(f"    Title  : {data['title']}")
-    print(f"    Script : {data['script'][:80]} …")
-    return data
+    print(f"[ERROR] All TTS methods failed. Last error: {last_error}", file=sys.stderr)
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Text-to-Speech
+# Step 4: Background music via Pollinations (ACE-Step)
 # ---------------------------------------------------------------------------
 
-def generate_tts(client: OpenAI, script: str, audio_path: Path) -> None:
-    print("[2/4] Generating TTS audio …")
-    with client.audio.speech.with_streaming_response.create(
-        model="tts-1",
-        voice="nova",          # bright, energetic voice — swap to any OpenAI TTS voice
-        input=script,
-        response_format="mp3",
-    ) as response:
-        response.stream_to_file(str(audio_path))
-    print(f"    Saved  : {audio_path}")
+
+def generate_music(prompt: str, duration_secs: int, music_path: Path) -> bool:
+    """Generate background music. Returns True on success, False on failure."""
+    print("[4/5] Generating background music …")
+    clamped = min(max(int(duration_secs) + 5, 5), 30)  # clamp to 5-30 s
+    try:
+        encoded = urllib.parse.quote(prompt, safe="")
+        resp = requests.get(
+            f"{POLLINATIONS_BASE}/audio/{encoded}",
+            params={"model": "acestep", "duration": clamped},
+            headers=_auth_header(),
+            timeout=120,
+        )
+        resp.raise_for_status()
+        if len(resp.content) < 1024:
+            raise ValueError("Response too small")
+        music_path.write_bytes(resp.content)
+        print(f"    ✓ Music saved ({music_path.stat().st_size // 1024} KB, {clamped}s)")
+        return True
+    except Exception as exc:
+        print(f"    ⚠ Music generation failed: {exc} — video will use TTS-only audio")
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Compose video with FFmpeg
+# Step 5: Video composition with FFmpeg
 # ---------------------------------------------------------------------------
+
 
 def get_audio_duration(audio_path: Path) -> float:
-    """Return audio duration in seconds using ffprobe."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "error",
@@ -172,89 +336,129 @@ def get_audio_duration(audio_path: Path) -> float:
 
 
 def build_subtitle_file(script: str, duration: float, srt_path: Path) -> None:
-    """Create a simple SRT file: split script into ~6-word chunks timed evenly."""
+    """Create an SRT file: ~6 words per cue, evenly timed."""
     words = script.split()
     chunk_size = 6
     chunks = [" ".join(words[i : i + chunk_size]) for i in range(0, len(words), chunk_size)]
     n = len(chunks)
     segment = duration / n if n else duration
 
-    def srt_time(seconds: float) -> str:
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        ms = int((seconds % 1) * 1000)
-        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    def fmt(s: float) -> str:
+        h, r = divmod(s, 3600)
+        m, r = divmod(r, 60)
+        sec = int(r)
+        ms = int((r % 1) * 1000)
+        return f"{int(h):02d}:{int(m):02d}:{sec:02d},{ms:03d}"
 
     with open(srt_path, "w", encoding="utf-8") as f:
         for i, chunk in enumerate(chunks):
-            start = i * segment
-            end = (i + 1) * segment
-            f.write(f"{i+1}\n")
-            f.write(f"{srt_time(start)} --> {srt_time(end)}\n")
-            f.write(f"{chunk}\n\n")
+            f.write(f"{i + 1}\n{fmt(i * segment)} --> {fmt((i + 1) * segment)}\n{chunk}\n\n")
 
 
 def compose_video(
+    bg_image_path: Path,
     audio_path: Path,
+    music_path: Optional[Path],
     srt_path: Path,
     output_path: Path,
 ) -> None:
     """
     FFmpeg pipeline:
-      - Loop the avatar PNG for the audio duration (portrait 9:16, 1080×1920)
-      - Add a semi-transparent dark gradient at the bottom for subtitle readability
-      - Burn in subtitles
-      - Mux with TTS audio
+      • Input 0 : background image (looped)
+      • Input 1 : TTS speech audio
+      • Input 2 : BGM audio (optional, stream-looped)
+    Filters:
+      • Ken Burns slow zoom-in (1.0 → 1.15) over full video duration
+      • Translucent bottom bar for subtitle readability
+      • Styled burned-in subtitles (white, bold, 38pt, outline)
+      • Audio: TTS full volume + BGM at 20%, mixed
     """
-    print("[3/4] Composing video with FFmpeg …")
+    print("[5/5] Composing video with FFmpeg …")
 
-    duration = get_audio_duration(audio_path)
+    speech_duration = get_audio_duration(audio_path)
+    total_duration = speech_duration + AUDIO_BUFFER_SECONDS
+    total_frames = max(int(total_duration * VIDEO_FPS) + 1, 1)
 
-    # Escape srt path for FFmpeg filtergraph
+    # Zoom increment to reach +15% over the video
+    zoom_inc = 0.15 / total_frames
+    # Scale background 20% larger than output to have panning room during zoom
+    bg_w = int(VIDEO_WIDTH * 1.2)
+    bg_h = int(VIDEO_HEIGHT * 1.2)
+
     srt_escaped = str(srt_path).replace("\\", "/").replace(":", "\\:")
 
-    # Build complex filter:
-    #   [0:v] scale+pad avatar to 1080×1920 → [bg]
-    #   drawbox for subtitle background gradient
-    #   subtitles filter for burned-in captions
-    vf_filter = (
-        f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,"
-        f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"drawbox=y=ih-320:color=black@0.45:width=iw:height=320:t=fill,"
-        f"subtitles={srt_escaped}:force_style='"
-        f"FontName=Arial,FontSize=28,PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,Outline=2,Alignment=2,"
-        f"MarginV=60'"
+    # ── video filter ─────────────────────────────────────────────────────────
+    # [bg]: Ken Burns — scale large, crop, slow zoom centered
+    bg_vf = (
+        f"[0:v]"
+        f"scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,"
+        f"crop={bg_w}:{bg_h},"
+        f"zoompan="
+        f"z='min(zoom+{zoom_inc:.8f},1.15)':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d={total_frames}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps={VIDEO_FPS}"
+        f"[bg];"
     )
+    # [outv]: subtitle bar + burned-in captions
+    sub_vf = (
+        f"[bg]"
+        f"drawbox=y=ih-310:color=0x000000AA:width=iw:height=310:t=fill,"
+        f"subtitles={srt_escaped}:force_style='"
+        f"FontName=Liberation Sans,FontSize=38,Bold=1,"
+        f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,"
+        f"Shadow=1,Alignment=2,MarginV=55'"
+        f"[outv]"
+    )
+    video_filter = bg_vf + sub_vf
 
-    run([
-        "ffmpeg", "-y",
-        "-loop", "1",
-        "-framerate", str(VIDEO_FPS),
-        "-i", str(AVATAR_IMAGE),
-        "-i", str(audio_path),
-        "-vf", vf_filter,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-shortest",
-        "-t", str(duration + AUDIO_BUFFER_SECONDS),
+    # ── inputs + audio filter ────────────────────────────────────────────────
+    has_music = music_path is not None and music_path.exists()
+
+    if has_music:
+        input_args = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-framerate", str(VIDEO_FPS), "-i", str(bg_image_path),
+            "-i", str(audio_path),
+            "-stream_loop", "-1", "-i", str(music_path),
+        ]
+        # Trim BGM to video length; mix speech (100%) + BGM (20%)
+        audio_filter = (
+            f"[2:a]atrim=duration={total_duration},asetpts=PTS-STARTPTS[bgm];"
+            f"[1:a][bgm]amix=inputs=2:weights='1.0 0.2':normalize=0[outa]"
+        )
+        filter_complex = video_filter + ";" + audio_filter
+        audio_map = ["-map", "[outa]"]
+    else:
+        input_args = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-framerate", str(VIDEO_FPS), "-i", str(bg_image_path),
+            "-i", str(audio_path),
+        ]
+        filter_complex = video_filter
+        audio_map = ["-map", "1:a"]
+
+    cmd = input_args + [
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        *audio_map,
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", str(total_duration),
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         str(output_path),
-    ])
-    print(f"    Saved  : {output_path}")
+    ]
+    run(cmd)
+    print(f"    ✓ Video saved: {output_path}")
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Upload to YouTube
+# YouTube upload
 # ---------------------------------------------------------------------------
+
 
 def get_youtube_service():
-    """Build an authenticated YouTube service using OAuth2 refresh token."""
     credentials = Credentials(
         token=None,
         refresh_token=env("YOUTUBE_REFRESH_TOKEN"),
@@ -268,18 +472,30 @@ def get_youtube_service():
 
 
 def upload_to_youtube(video_path: Path, content: dict) -> str:
-    print("[4/4] Uploading to YouTube …")
+    print("[Upload] Uploading to YouTube …")
     youtube = get_youtube_service()
 
     title = content["title"]
-    if SHORT_HASHTAG not in title:
-        title = f"{title} {SHORT_HASHTAG}"
+    if "#Shorts" not in title:
+        title = f"{title} #Shorts"
+
+    # Deduplicate tags; enforce YouTube's 500-char total limit
+    all_tags = list(dict.fromkeys(
+        content.get("tags", [])
+        + ["VTuber", "Shorts", "Miku", "HatsuneMiku", "Anime", "AIGenerated"]
+    ))
+    tags_trimmed: list[str] = []
+    char_count = 0
+    for tag in all_tags:
+        if char_count + len(tag) + 2 <= 500:
+            tags_trimmed.append(tag)
+            char_count += len(tag) + 2
 
     body = {
         "snippet": {
             "title": title[:100],
-            "description": content["description"],
-            "tags": content.get("tags", []) + ["VTuber", "Shorts", "Miku"],
+            "description": content["description"][:5000],
+            "tags": tags_trimmed,
             "categoryId": YOUTUBE_CATEGORY_ID,
             "defaultLanguage": "en",
         },
@@ -293,9 +509,8 @@ def upload_to_youtube(video_path: Path, content: dict) -> str:
         str(video_path),
         mimetype="video/mp4",
         resumable=True,
-        chunksize=10 * 1024 * 1024,  # 10 MB chunks
+        chunksize=10 * 1024 * 1024,
     )
-
     request = youtube.videos().insert(
         part=",".join(body.keys()),
         body=body,
@@ -306,11 +521,10 @@ def upload_to_youtube(video_path: Path, content: dict) -> str:
     while response is None:
         status, response = request.next_chunk()
         if status:
-            pct = int(status.progress() * 100)
-            print(f"    Upload progress: {pct}%")
+            print(f"    Upload: {int(status.progress() * 100)}%")
 
     video_id = response.get("id", "unknown")
-    print(f"    Uploaded! https://www.youtube.com/shorts/{video_id}")
+    print(f"    ✓ Uploaded: https://www.youtube.com/shorts/{video_id}")
     return video_id
 
 
@@ -318,27 +532,40 @@ def upload_to_youtube(video_path: Path, content: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    openai_client = OpenAI(api_key=env("OPENAI_API_KEY"))
 
+def main() -> None:
     with tempfile.TemporaryDirectory(prefix="vtuber_short_") as tmpdir:
         tmp = Path(tmpdir)
+        bg_path = tmp / "background.jpg"
         audio_path = tmp / "speech.mp3"
+        music_path = tmp / "music.mp3"
         srt_path = tmp / "subtitles.srt"
         video_path = tmp / "short.mp4"
 
-        # 1. AI decides content
-        content = ai_generate_content(openai_client)
+        # 1. AI: topic, script, SEO metadata
+        content = ai_generate_content()
 
-        # 2. TTS
-        generate_tts(openai_client, content["script"], audio_path)
+        # 2. AI-generated background image
+        generate_background_image(content["bg_prompt"], bg_path)
 
-        # 3. Compose video
-        audio_duration = get_audio_duration(audio_path)
-        build_subtitle_file(content["script"], audio_duration, srt_path)
-        compose_video(audio_path, srt_path, video_path)
+        # 3. TTS
+        generate_tts(content["script"], audio_path)
 
-        # 4. Upload
+        # 4. Background music (optional — skip gracefully if fails)
+        speech_dur = get_audio_duration(audio_path)
+        music_ok = generate_music(content["music_prompt"], int(speech_dur), music_path)
+
+        # 5. Video composition
+        build_subtitle_file(content["script"], speech_dur, srt_path)
+        compose_video(
+            bg_image_path=bg_path,
+            audio_path=audio_path,
+            music_path=music_path if music_ok else None,
+            srt_path=srt_path,
+            output_path=video_path,
+        )
+
+        # 6. Upload to YouTube
         upload_to_youtube(video_path, content)
 
     print("[✓] Done!")
