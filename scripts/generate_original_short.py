@@ -71,7 +71,7 @@ TTS_MODEL_FALLBACK = ["elevenlabs", "openai"]
 TTS_VOICE = "nova"  # bright, energetic voice
 
 # Live2D capture settings
-CAPTURE_FPS     = 10   # frames per second for Puppeteer capture (lower = faster)
+CAPTURE_FPS     = 30   # frames per second for Puppeteer capture (matches output FPS for smooth motion)
 CAPTURE_PORT    = 8787 # local HTTP server port for serving the repo
 VIDEO_WIDTH     = 1080
 VIDEO_HEIGHT    = 1920
@@ -340,7 +340,7 @@ def get_audio_duration(audio_path: Path) -> float:
 
 def build_subtitle_file(script: str, duration: float, srt_path: Path) -> None:
     words = script.split()
-    chunk_size = 6
+    chunk_size = 4
     chunks = [" ".join(words[i: i + chunk_size]) for i in range(0, len(words), chunk_size)]
     n = len(chunks)
     segment = duration / n if n else duration
@@ -387,11 +387,11 @@ def compose_video(
         f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,"
         f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
         f"fps={VIDEO_FPS},"
-        f"drawbox=y=ih-310:color=0x000000AA:width=iw:height=310:t=fill,"
+        f"drawbox=y=ih-150:color=0x000000AA:width=iw:height=150:t=fill,"
         f"subtitles={srt_escaped}:force_style='"
-        f"FontName=Liberation Sans,FontSize=38,Bold=1,"
+        f"FontName=Liberation Sans,FontSize=22,Bold=1,"
         f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,"
-        f"Shadow=1,Alignment=2,MarginV=55'"
+        f"Shadow=1,Alignment=2,MarginV=30'"
         f"[outv]"
     )
 
