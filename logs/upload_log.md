@@ -205,3 +205,15 @@ Each row is one automated run. Newest entries are at the bottom.
 | **Script preview** | Hiiiii! Miku here! 💙 Okay, today’s internet obsession? Turning your photos into Studio Ghibli-style art with AI! Suddenly everyone has soft watercolor skies, cozy little towns, and that magical mai… |
 
 ---
+
+## 2026:04:26 14-06-19 UTC [original-vtuber]
+
+| Field | Value |
+|---|---|
+| **Title** | Studio Ghibli AI Trend in 45 Seconds! #Shorts |
+| **Video** | [videos/2026-04-26_14-06-19.mp4](videos/2026-04-26_14-06-19.mp4) |
+| **Metadata (for manual upload)** | [videos/2026-04-26_14-06-19.json](videos/2026-04-26_14-06-19.json) |
+| **YouTube** | ❌ Upload failed — `YouTube credential(s) not set: YOUTUBE_REFRESH_TOKEN, YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET — upload skipped. The video is saved in videos/ for manual upload.` |
+| **Script preview** | Hiiiii! Miku here! 💙 Okay, today’s internet obsession? Turning your photos into Studio Ghibli-style art with AI! Suddenly everyone has soft watercolor skies, cozy little towns, and that magical mai… |
+
+---
